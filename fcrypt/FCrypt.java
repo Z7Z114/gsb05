@@ -160,13 +160,16 @@ public final class FCrypt {
             checkOutput(in, out, force);
 
             Path tmp = Files.createTempFile(parentOrCwd(out), ".fcrypt-", ".tmp");
-            if (encrypt) {
-                encryptFile(key, in, tmp);
-            } else {
-                decryptFile(key, in, tmp);
+            try {
+                if (encrypt) {
+                    encryptFile(key, in, tmp);
+                } else {
+                    decryptFile(key, in, tmp);
+                }
+                moveIntoPlace(tmp, out, force);
+            } finally {
+                deleteQuietly(tmp);
             }
-            moveIntoPlace(tmp, out, force);
-            deleteQuietly(tmp);
             return EXIT_OK;
         } finally {
             Arrays.fill(key, (byte) 0);
@@ -224,7 +227,7 @@ public final class FCrypt {
             for (;;) {
                 int len = readIntOrEof(is);
                 if (len < 0) {
-                    return;
+                    throw new AuthException("truncated: stream ended before the final chunk");
                 }
                 if (len < TAG_LEN || len > CHUNK + TAG_LEN) {
                     throw new AuthException("corrupt chunk length: " + len);
@@ -242,6 +245,9 @@ public final class FCrypt {
                 os.write(plain);
                 index++;
                 if ((flag & FLAG_FINAL) != 0) {
+                    if (is.read() >= 0) {
+                        throw new AuthException("trailing data after the final chunk");
+                    }
                     return;
                 }
             }
@@ -257,13 +263,16 @@ public final class FCrypt {
         }
         ByteBuffer bb = ByteBuffer.allocate(IV_LEN).order(ByteOrder.BIG_ENDIAN);
         bb.put(salt);
-        bb.putInt(0);
+        bb.putInt((int) index);
         return bb.array();
     }
 
-    /** AAD binds the final flag into the GCM tag. */
+    /** AAD binds the chunk index and the final flag into the GCM tag. */
     private static byte[] aad(long index, boolean fin) {
-        return new byte[]{(byte) (fin ? FLAG_FINAL : 0)};
+        ByteBuffer bb = ByteBuffer.allocate(9).order(ByteOrder.BIG_ENDIAN);
+        bb.putLong(index);
+        bb.put((byte) (fin ? FLAG_FINAL : 0));
+        return bb.array();
     }
 
     private static byte[] seal(byte[] key, byte[] salt, long index, byte[] plain, int off, int len, boolean fin)
